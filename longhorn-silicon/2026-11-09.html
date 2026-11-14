@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>nov 9 – 15 · Longhorn Silicon</title>
+  <link rel="stylesheet" href="../style.css">
+</head>
+<body data-root="../">
+  <div class="layout">
+    <nav></nav>
+    <main>
+      <h1>nov 9 – 15</h1>
+
+      <!-- write here -->
+      <p class="muted">end-to-end firmware on the new reef-perf</p>
+
+      <!-- reference notes: delete this block before publishing -->
+      <div class="notes">
+        <ul>
+          <li>int4 quantization analysis: accumulator widths for signed/unsigned products on a 16×16 outer-product engine; confirmed the kernels use no floating point.</li>
+          <li>PR #57 (open): end-to-end GPT-Neo TinyStories-28M firmware on M3 + Zvt matrix unit + DMA on arch&#x27;s new reef-perf branch. Weights and KV cache stream from XSPI flash into 32 KB DTCM; code fits 8 KB ITCM.</li>
+          <li>After review: one file per kernel, build-time configurable ELFs, integer-only LayerNorm (Q15 inverse sqrt, 14% faster, no F extension).</li>
+          <li>Decode at 1.30 tok/s at context 1024.</li>
+          <li>Full run, 16-token prompt + 64 generated: 2.18B cycles = 43.6 s chip time at 50 MHz, ~665 ms per decode token.</li>
+          <li>reef-perf and earlier RTL estimates agree within ~5%.</li>
+          <li>Pushed measured TinyStories 28M/33M numbers to the explorer.</li>
+          <li>Bandwidth: ~78 MB/s while loading weights; LM head ~46% of decode time.</li>
+          <li>Slide (Nov 13) on the e2e kernels with double-buffered load/compute cycles per kernel.</li>
+        </ul>
+      </div>
+    </main>
+  </div>
+  <script src="../nav.js"></script>
+</body>
+</html>

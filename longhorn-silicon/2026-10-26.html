@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>oct 26 – nov 1 · Longhorn Silicon</title>
+  <link rel="stylesheet" href="../style.css">
+</head>
+<body data-root="../">
+  <div class="layout">
+    <nav></nav>
+    <main>
+      <h1>oct 26 – nov 1</h1>
+
+      <!-- write here -->
+      <p class="muted">gpt-neo engine merged, matrix-mode proposal, itcm fit</p>
+
+      <!-- reference notes: delete this block before publishing -->
+      <div class="notes">
+        <ul>
+          <li>PR #27 merged (Oct 26), ~+7.8k/−10k lines, 145 files: C++ engine runs full GPT-Neo (loads Hugging Face checkpoints; prefill, cached decode, greedy generation; fp32 or W8A8).</li>
+          <li>New coral/ directory: kernels and firmware that match the engine bit for bit, 7 golden tests, 12 reef-perf benchmarks, coral_sim CI workflow.</li>
+          <li>Decode GEMV / matrix-mode proposal for arch (DECODE_GEMV_PROPOSAL.md): proposed new reef-perf matrix params (mtx_tile_dim and others).</li>
+          <li>Wrote .S microbenchmarks with 16/8/4 tile variants, checked against NumPy on the RTL, re-ran on a newer Coral commit.</li>
+          <li>Answered arch questions on bandwidth, the DMA path and SPI.</li>
+          <li>Transposed operand layout: 32 loads per 16×16 matmul instead of 80; later measured 84 → 25 cycles per step.</li>
+          <li>Reviewed PR #37 (Deslop).</li>
+          <li>PR #48: fit every kernel in the 8 KiB ITCM at once, 8,096 → 6,368 bytes, with a build guard enforcing the limit in CI.</li>
+        </ul>
+      </div>
+    </main>
+  </div>
+  <script src="../nav.js"></script>
+</body>
+</html>
