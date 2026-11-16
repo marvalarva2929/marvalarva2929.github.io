@@ -42,10 +42,14 @@ p { margin-bottom: 12px; }
   position: fixed;
   top: 50%; left: 50%;
   transform: translate(-50%, -50%);
-  width: min(520px, 70vw);
+  width: min(560px, 70vw);
   pointer-events: none;
-  -webkit-mask-image: radial-gradient(ellipse at center, #000 55%, transparent 72%);
-  mask-image: radial-gradient(ellipse at center, #000 55%, transparent 72%);
+  --fade-x: linear-gradient(to right, transparent, #000 4%, #000 96%, transparent);
+  --fade-y: linear-gradient(to bottom, transparent, #000 6%, #000 94%, transparent);
+  -webkit-mask-image: var(--fade-x), var(--fade-y);
+  -webkit-mask-composite: source-in;
+  mask-image: var(--fade-x), var(--fade-y);
+  mask-composite: intersect;
 }
 
 @media (max-width: 700px) {
