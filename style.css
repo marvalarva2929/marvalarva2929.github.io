@@ -37,7 +37,7 @@ p { margin-bottom: 12px; }
 .notes ul { padding-left: 18px; }
 .notes li { margin-bottom: 6px; }
 
-/* home: Calvin and Hobbes walking along the bottom, leaving footprints */
+/* home: Calvin and Hobbes at the bottom, with their footprints behind them */
 .walk {
   position: fixed;
   left: 0; right: 0; bottom: 0;
@@ -50,16 +50,12 @@ p { margin-bottom: 12px; }
   left: 0; bottom: 12px;
   height: 170px;
   mix-blend-mode: multiply; /* the cutout's white disappears into the page */
-  will-change: transform;
 }
 .print {
   position: absolute;
   border-radius: 50%;
   background: #b9b9b9;
-  animation: melt 16s linear forwards;
 }
-.print.still { animation: none; }
-@keyframes melt { 0%, 40% { opacity: 1; } 100% { opacity: 0; } }
 
 @media (max-width: 700px) {
   .layout { padding: 28px 16px; }
