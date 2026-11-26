@@ -4,22 +4,85 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Joshua Vigel</title>
-  <link rel="stylesheet" href="style.css?v=8">
+  <link rel="stylesheet" href="style.css?v=25">
 </head>
 <body data-root="">
   <div class="layout">
     <nav></nav>
     <main>
       <h1>Joshua Vigel</h1>
-      <p>cs at ut austin. inference kernels at longhorn silicon.</p>
+      <p class="subtitle">CS Honors, Business Honors, Robotics Minor, UT Austin<br>Inference @ Longhorn Silicon</p>
+      <p class="intro">Low-level systems enthusiast. I write the kernels that run LLM inference on Longhorn Silicon's chip, squeezing a language model through 32 KB of on-chip memory.</p>
       <div class="links">
-        <a href="https://github.com/marvalarva2929">github</a>
-        <a href="longhorn-silicon/index.html">longhorn silicon</a>
+        <a href="https://github.com/marvalarva2929">GitHub ↗</a>
+        <a href="https://medium.com/@joshvigel">Medium ↗</a>
       </div>
+
+      <!-- Each entry shows its title; clicking it opens the subtitle and a link to the full piece. -->
+      <section>
+        <div class="sectionbar"><h2>Research</h2></div>
+        <details class="entry" name="entries">
+          <summary><span class="title">Running an LLM at 1.5 tokens/s on a chip with 32 KB of memory</span></summary>
+          <div class="more">
+            <p>End-to-end GPT-Neo on Reef, our NPU: int8 kernels that fit in 8 KB of instruction memory and stream every weight from flash.</p>
+            <span class="meta">Longhorn Silicon</span><br>
+            <a class="view" href="longhorn-silicon/index.html">View more →</a>
+          </div>
+        </details>
+        <details class="entry" name="entries">
+          <summary><span class="title">Self Knowledge-Tracing for Tool Use (SKT-Tool): Helping LLM Agents Understand Their Capabilities in Tool Use</span></summary>
+          <div class="more">
+            <p>Knowledge tracing lets an LLM agent judge its own ability before calling a tool, cutting API calls while keeping accuracy.</p>
+            <span class="meta">Insights from Negative Results in NLP, 2025</span><br>
+            <a class="view" href="https://aclanthology.org/2025.insights-1.14/">Read the paper ↗</a>
+          </div>
+        </details>
+      </section>
+
+      <section>
+        <div class="sectionbar"><h2>Projects</h2></div>
+        <details class="entry" name="entries">
+          <summary><span class="title">Corda AI: Teaching the Violin through AI</span></summary>
+          <div class="more">
+            <p>An iOS app that watches and listens while you practice, measures your playing on-device, and turns it into coaching.</p>
+            <span class="meta"><a href="https://apps.apple.com/us/app/corda-violin-practice/id6801934738">App Store ↗</a></span><br>
+            <a class="view" href="corda/index.html">View more →</a>
+          </div>
+        </details>
+        <details class="entry" name="entries">
+          <summary><span class="title">epicgameengine: a 3D renderer from scratch in C++</span></summary>
+          <div class="more">
+            <p>Hand-written matrix math, perspective projection and .obj model loading, drawn with SDL2.</p>
+            <span class="meta">C++ · 2024</span><br>
+            <a class="view" href="https://github.com/marvalarva2929/epicgameengine">View on GitHub ↗</a>
+          </div>
+        </details>
+      </section>
+
+      <section>
+        <div class="sectionbar"><h2>Writing</h2></div>
+        <details class="entry" name="entries">
+          <summary><span class="title">Morality, nihilism, and animal cruelty</span></summary>
+          <div class="more">
+            <p>A nihilist's case against animal cruelty: how to oppose it without believing in objective morality.</p>
+            <span class="meta">Medium · Apr 2025</span><br>
+            <a class="view" href="https://medium.com/@joshvigel/morality-nihilism-and-animal-cruelty-8fa6c568dfe0">Read on Medium ↗</a>
+          </div>
+        </details>
+        <details class="entry" name="entries">
+          <summary><span class="title">Nothing exists</span></summary>
+          <div class="more">
+            <p>You can show in 3 questions that nothing exists.</p>
+            <span class="meta">Medium · Apr 2025</span><br>
+            <a class="view" href="https://medium.com/@joshvigel/nothing-exists-61d6aa28ff5f">Read on Medium ↗</a>
+          </div>
+        </details>
+      </section>
+
     </main>
   </div>
-  <div class="walk"><img class="walkers" src="walkers.jpg?v=8" alt="Calvin and Hobbes walking"></div>
-  <script src="nav.js?v=8"></script>
-  <script src="walk.js?v=8"></script>
+  <div class="walk"><img class="walkers" src="walkers.jpg?v=24" alt="Calvin and Hobbes walking"></div>
+  <script src="nav.js?v=25"></script>
+  <script src="walk.js?v=24"></script>
 </body>
 </html>

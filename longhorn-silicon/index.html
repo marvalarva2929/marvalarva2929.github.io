@@ -3,18 +3,298 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Longhorn Silicon</title>
-  <link rel="stylesheet" href="../style.css?v=8">
+  <title>Running an LLM at 1.5 tokens/s on 32 KB · Joshua Vigel</title>
+  <link rel="stylesheet" href="../style.css?v=25">
 </head>
 <body data-root="../">
   <div class="layout">
     <nav></nav>
     <main>
-      <h1>Longhorn Silicon</h1>
-      <p class="muted"><!-- one or two lines about the team and your role --></p>
-      <div class="links" id="weeks"></div>
+      <article data-crumb="Longhorn Silicon">
+        <h1>Running an LLM at 1.5 tokens/s on a chip with 32 KB of memory</h1>
+
+        <ul class="toc"></ul>
+
+        <!-- ============================================================ -->
+        <section id="intro">
+          <h2>TL;DR, intro and motivation</h2>
+          <p>This article describes my work at <a href="https://github.com/LonghornSilicon">Longhorn Silicon</a>, a student-led silicon design organization at UT Austin, during its first tapeout. I've always been interested in low-level performance software and kept up with LLM architectures, but I had never done real inference work. Longhorn Silicon is the beginning of my work in this growing and important field.</p>
+          <p>Throughout the semester I built specialized kernels for <a href="https://github.com/EleutherAI/gpt-neo">GPT-Neo</a> (<a href="https://huggingface.co/roneneldan/TinyStories-28M">TinyStories-28M</a>) to run on our chip. Using these kernels, we've reached around 1.4 tokens/second on a chip with 32 KiB of SRAM. Below I explain in depth how I built these kernels to reach that performance, the challenges and problems we faced along the way, how I communicated and co-designed with our hardware teams, and what we plan to do next.</p>
+          <p>Biggest accomplishments so far:</p>
+          <ul>
+            <li><strong>Flash attention.</strong> I implemented attention so it streams the KV cache through the chip one block at a time, which is the only way it fits in 32 KB.</li>
+            <li><strong>Kernel optimizations.</strong> I optimized every kernel in the model, which made decode more than 7× faster: 0.19 → 1.43 tokens/s.</li>
+            <li><strong>No floating point.</strong> I removed every floating-point instruction from our kernels, so they run on integer math alone. That lets the hardware team leave the floating-point unit out of the chip and save the area.</li>
+            <li><strong>Roofline analysis.</strong> The roofline analysis I did gave the hardware teams our memory bandwidth requirements: 100 MB/s from flash for the weights and 50 MB/s from PSRAM for the KV cache.</li>
+            <li><strong>The reef-perf roofline visualizer.</strong> I built an online tool that shows our projected performance and bottlenecks from the latest performance-model runs. The model efficiency team can use it to try out different model architectures and estimate their performance, and the hardware teams can quickly see the effect of changing parameters.</li>
+          </ul>
+        </section>
+
+        <!-- ============================================================ -->
+        <section id="memory">
+          <h2>1. The problem: very little memory</h2>
+
+          <h3>1.1 The workload</h3>
+          <p>The goal of an inference accelerator chip is to run an LLM. While we are looking at other workloads, our primary goal is inference.</p>
+          <p>The challenging part is that our chip is tiny. We're a new club, and we don't have the funds (or the experience) yet to design an Nvidia GPU.</p>
+          <p>So we decided to run a tiny model. It's called TinyStories-28M, from the <a href="https://arxiv.org/abs/2305.07759">TinyStories</a> paper, a small GPT-Neo model. It can't code or do math, but it's enough to write coherent children's stories. It has 52 million parameters (3,000× fewer than <a href="https://arxiv.org/abs/2005.14165">GPT-3</a>). Even so, it's extremely difficult to run.</p>
+          <p>Our PD teams told us early on that we could support at most 40 KB of on-chip memory, of which 8 KB has to be saved for instructions.</p>
+          <p>For reference, our model needs ~75 MB of space to store, and every token takes up 8 KB in the KV cache (1 KB for each of the 8 layers). This is where the challenge begins. The model and KV cache can't be stored on the chip, only a tiny portion can be worked on at any given time, and the rest has to be stored off-chip. <strong><u>This constraint is what drives the software choices we had to make.</u></strong></p>
+
+          <h3>1.2 Why attention is hard</h3>
+          <p>For the linear layers in the model, we can stream the weights in. For example, calculating the query vector for a token is a single [1×512] × [512×512] (x · W<sub>q</sub>) matmul. We can keep x in memory and continually stream [16×16] blocks of W<sub>q</sub> from whatever external storage we have. The concern here is making sure we can stream the weights in fast enough.</p>
+          <p>Attention, however, is difficult. The cornerstone of modern LLMs is the transformer, first introduced in the <a href="https://arxiv.org/abs/1706.03762"><em>Attention Is All You Need</em></a> paper from Google almost a decade ago. As the name suggests, the transformer relies on attention.</p>
+          <p>Attention works by comparing a token to every token before it and calculating a score that says how much it "attends" to each of them. Turning those scores into weights uses a function called softmax, whose parameters require the <strong>entire</strong> input to calculate. That means we can't stream parts of the input through softmax: we need to see the entire input before calculating.</p>
+        </section>
+
+        <!-- ============================================================ -->
+        <section id="flash">
+          <h2>2. The solution: flash attention</h2>
+
+          <h3>Flash attention vs. standard attention</h3>
+          <p><a href="https://arxiv.org/abs/2205.14135">Flash attention</a> never stores the full set of scores. It walks through the keys and values one block at a time (16 positions here), so only one block has to be on-chip at once. To get the softmax right without seeing every score first, it uses a modification called <a href="https://arxiv.org/abs/1805.02867"><em>online softmax</em></a> and keeps three running values for each query: the largest score so far (m), the sum of exponentials so far (ℓ), and the weighted sum of values so far (O). When a new block arrives:</p>
+          <ol>
+            <li>Score the block against the query (a matmul) and find the block's largest score. The new running maximum is m′ = max(m, block max).</li>
+            <li>If the maximum went up, everything accumulated so far was computed against the old m and is now too large by a factor of e<sup>m′ − m</sup>. Multiply ℓ and O by α = e<sup>m − m′</sup> to correct them.</li>
+            <li>Compute the block's probabilities p = e<sup>s − m′</sup>, add their sum to ℓ, and add p · V (a second matmul) to O.</li>
+          </ol>
+          <p>After the last block, O / ℓ is exactly the attention output, the same as if every score had been stored. Each key and value is read once, and the only state that survives between blocks is m, ℓ and O. The working set is one block plus a few small running values no matter how long the context gets, and both steps that do the real work are matmuls on the matrix engine.</p>
+
+          <h3>Implementing it with double buffering</h3>
+          <p>Loading a chunk and computing on it one after the other wastes time: the matrix engine waits while the DMA loads, and the DMA waits while the engine computes. With double buffering there are two buffers. While the engine computes on chunk <em>i</em> in one, the DMA loads chunk <em>i+1</em> into the other. When both are done they swap. As long as computing a chunk takes about as long as loading one, the memory transfers are almost entirely hidden.</p>
+          <figure class="timeline">
+            <figcaption>Three 2 KB chunks of QKV weights at 100 MB/s: a load takes 1,024 cycles and computing on a chunk about 1,340</figcaption>
+            <div class="tl-row"><span class="tl-name">Without double buffering</span><div class="tl-track">
+              <i class="load" style="left:0;width:11.9%">load 1</i><i class="comp" style="left:11.9%;width:15.6%">compute 1</i>
+              <i class="load" style="left:27.5%;width:11.9%">load 2</i><i class="comp" style="left:39.4%;width:15.6%">compute 2</i>
+              <i class="load" style="left:55%;width:11.9%">load 3</i><i class="comp" style="left:66.9%;width:15.6%">compute 3</i>
+            </div><span class="tl-total">7,092 cycles</span></div>
+            <div class="tl-row"><span class="tl-name">With double buffering</span><div class="tl-track">
+              <i class="load" style="left:0;width:11.9%">load 1</i>
+              <i class="load lane2" style="left:11.9%;width:11.9%">load 2</i><i class="comp" style="left:11.9%;width:15.6%">compute 1</i>
+              <i class="load lane2" style="left:27.5%;width:11.9%">load 3</i><i class="comp" style="left:27.5%;width:15.6%">compute 2</i>
+              <i class="comp" style="left:43.1%;width:15.6%">compute 3</i>
+            </div><span class="tl-total">5,044 cycles</span></div>
+            <div class="legend"><span><i style="background:#257de0"></i>DMA loading a chunk</span><span><i style="background:#f47230"></i>Core computing on a chunk</span></div>
+          </figure>
+          <p>Here's how the DTCM is split up while attention runs. The bar is the whole 32 KB drawn to scale. The colored regions are what attention uses, and the gray ones are idle.</p>
+          <div class="dtcm" data-name="attention" data-use="normed=attention output written|shared=Q, K, V and two KV buffers|scratch=softmax state: running max, sum and output"></div>
+        </section>
+
+        <!-- ============================================================ -->
+        <section id="optimizations">
+          <h2>3. Further optimizations I made to kernels</h2>
+          <p>To see what each optimization is worth, I added a switch for each one to the firmware and measured decode of token 200 on reef-perf, with weights streaming at 100 MB/s and the KV cache at 50 MB/s. I started with all of them off and turned them back on one at a time, from the smallest gain to the largest.</p>
+
+          <figure class="chart" data-kind="columns">
+            <figcaption>Decode speed as each optimization is added (tokens/s, token 200)</figcaption>
+            <script type="application/json">
+            {
+              "unit": "tok/s",
+              "max": 4,
+              "decimals": 2,
+              "series": ["Measured on reef-perf", "Estimate: output quality still being tested"],
+              "rows": [
+                {"label": "Baseline", "values": [0.19]},
+                {"label": "+ lookup tables for exp and GeLU", "values": [0.20], "change": "+1.5%"},
+                {"label": "+ matrix engine for linear layers", "values": [0.20], "change": "+3%"},
+                {"label": "+ double buffering", "values": [0.29], "change": "+43%"},
+                {"label": "+ transposed weights", "values": [1.45], "change": "+400%"},
+                {"label": "+ int4 weights", "values": [2.35], "series": 1, "change": "+62%"},
+                {"label": "+ low-rank weights", "values": [3.62], "series": 1, "change": "+54%"}
+              ]
+            }
+            </script>
+          </figure>
+          <p>The two biggest gains are both about memory. Storing the weights transposed, in the exact order the matrix engine reads them, turns each 2 KB chunk into one contiguous transfer. Without it, PyTorch's [out][in] layout splits every chunk into 64 separate 32-byte transfers, and the matrix engine has to gather its operands with strided loads. Double buffering then hides the load time behind compute. Decode is limited by how fast weights arrive, so these matter far more than making the compute itself faster. The int4 and low-rank bars are estimates: I applied the per-layer speedups we measured for those kernels (1.73× and 1.71×) to every linear layer, including the lm_head. Combining the two hasn't been run yet, so its bar assumes the speedups multiply.</p>
+
+          <ol class="opts">
+            <li><strong>Transposed weights.</strong> Weights are stored offline in the order the matrix engine reads them, so every 2 KB chunk is one contiguous DMA and every operand load is contiguous. <span class="effect">+400%, 0.29 → 1.45 tokens/s. On the RTL, one matrix engine step went from 84 to 25 cycles.</span></li>
+            <li><strong>Double buffering</strong> for the weights and the KV cache: the next chunk loads while the current one is computed. <span class="effect">+43%, 0.20 → 0.29 tokens/s, measured before the transpose. Turning it off in today's firmware halves the speed (1.43 → 0.78 tokens/s).</span></li>
+            <li><strong>Linear layers on the matrix engine</strong> instead of the vector unit. <span class="effect">+3% in the ladder; turning it off in today's firmware costs 12%.</span></li>
+            <li><strong>Lookup-table exp and precomputed GeLU.</strong> The integer-only vector unit made <code>exp</code> and GeLU's <code>tanh</code> expensive, so the softmax reads exp from a 256-entry table and GeLU is precomputed into its own 256-entry table indexed by the int8 input. <span class="effect">+1.5% in the ladder; turning them off in today's firmware costs 8%.</span></li>
+            <li><strong>Fused epilogues.</strong> GeLU, the residual add and the lm_head's argmax happen inside the linear kernel instead of as separate passes, so the lm_head never stores its 50,257 scores. <span class="effect">Turning it off in today's firmware costs 1%.</span></li>
+            <li><strong>Attention on the matrix engine</strong>, with decode reading each block's 16 scores as a single row. <span class="effect">No decode gain at 200 tokens: attention is small at that length, and the vector unit keeps up. Without the row reads it's 11% slower than the vector unit.</span></li>
+            <li><strong>Integer-only LayerNorm</strong>, with 1/√variance in Q15 fixed point. <span class="effect">About 2% slower than a float LayerNorm on a chip with an FPU, but it means the chip doesn't need one.</span></li>
+            <li><strong>Vectorizing every integer loop</strong>, with fixed-point requantization. <span class="effect">Residual add 32×, LayerNorm 17×, GeLU 7.6×, MLP 6×, softmax 4× faster (RTL).</span></li>
+            <li><strong>Feature-major activations.</strong> Activations are stored as [feature][token], so a row is exactly what the matrix engine reads, and LayerNorm, softmax and requantization work across 16 tokens at once with plain vector instructions.</li>
+            <li><strong>KV cache in blocks of 16 positions</strong>, so each transfer is contiguous.</li>
+          </ol>
+          <p>With every optimization on, including the integer LayerNorm, decode runs at <strong>1.43 tokens/s at token 200</strong> and 1.30 tokens/s at 1,024 tokens of context (782 ms per token).</p>
+        </section>
+
+        <!-- ============================================================ -->
+        <section id="bottlenecks">
+          <h2>4. Performance bottlenecks</h2>
+
+          <h3>Memory rooflines</h3>
+          <p>With double buffering, each kernel computes on one 2 KB chunk while the next one loads. If computing a chunk takes 1,000 cycles, the next 2 KB has to arrive within 1,000 cycles, or the kernel waits on memory. So the time each kernel spends on one chunk sets the bandwidth it needs. For the linear layers a chunk is 2 KB of weights. For attention it's the keys and values of one head over 32 positions. These are measured on reef-perf with unlimited memory bandwidth, so they're compute time only.</p>
+          <table class="num">
+            <tr><th>Kernel</th><th>Compute per 2 KB</th><th>Bandwidth to keep up</th></tr>
+            <tr><td>QKV</td><td>1,343 cycles</td><td>76 MB/s</td></tr>
+            <tr><td>Attention output</td><td>1,447 cycles</td><td>71 MB/s</td></tr>
+            <tr><td>fc1</td><td>1,391 cycles</td><td>74 MB/s</td></tr>
+            <tr><td>fc2</td><td>1,271 cycles</td><td>81 MB/s</td></tr>
+            <tr><td>lm_head</td><td>1,201 cycles</td><td>85 MB/s</td></tr>
+            <tr><td>Attention (keys and values)</td><td>2,424 cycles</td><td>42 MB/s</td></tr>
+          </table>
+          <p>That's where our targets of 100 MB/s for the weights and 50 MB/s for the KV cache came from: every kernel needs less than that, so neither link holds it back. Past those rates more bandwidth stops helping, because the kernels can't consume data any faster. Sweeping the flash bandwidth shows it directly:</p>
+
+          <figure class="chart" data-kind="columns">
+            <figcaption>Decode speed vs. flash bandwidth (tokens/s, token 200)</figcaption>
+            <script type="application/json">
+            {
+              "unit": "tok/s",
+              "max": 1.6,
+              "decimals": 2,
+              "series": ["Measured on reef-perf"],
+              "rows": [
+                {"label": "25 MB/s", "values": [0.46]},
+                {"label": "50 MB/s", "values": [0.84]},
+                {"label": "100 MB/s", "values": [1.43]},
+                {"label": "200 MB/s", "values": [1.43]},
+                {"label": "400 MB/s", "values": [1.43]},
+                {"label": "Unlimited", "values": [1.45]}
+              ]
+            }
+            </script>
+          </figure>
+          <p>Up to 100 MB/s, decode speed rises almost in step with bandwidth: it's memory bound. Past 100 MB/s it flattens at about 1.45 tokens/s, the speed with unlimited bandwidth, because now the core is the limit. The rest of this section is about why.</p>
+
+          <h3>Why the matrix engine is mostly idle</h3>
+          <p>During decode the matrix engine is busy about 1–2% of the time and gets nowhere near its peak ops/s. Part of that is physics. Decoding one token is a matrix-vector product, so each weight byte is used in exactly one MAC. At 100 MB/s flash delivers 2 bytes per cycle, which supports 2 MACs per cycle out of the engine's 128: a ceiling of <strong>1.56% utilization</strong>, no matter what the core does. The same math gives the speed limit: 100 MB/s ÷ 52 MB per token ≈ 1.9 tokens/s.</p>
+          <p>The other part is that we don't even reach that ceiling: even with 100 MB/s from flash to the DTCM, getting the weights from the DTCM into the matrix engine has a significant cost. Every weight byte takes this path:</p>
+          <div class="flow">
+            <span>Flash</span><i>DMA, 2 KB chunks</i>
+            <span>DTCM</span><i>load instruction, 16 B at a time</i>
+            <span>Vector register</span><i>MAC instruction</i>
+            <span>Matrix engine</span>
+          </div>
+          <p>The core has to bring the weights from the DTCM into the matrix engine, and that's where we see the biggest performance bottleneck. It works like this. The matrix engine can't read memory on its own, so the core runs a <em>load</em> instruction for every 16 bytes of weights, which copies them from the DTCM into a vector register. Loads are executed by the core's load/store unit (LSU). The core can work on several instructions at once, and it tracks the ones in flight in a reorder buffer (ROB). Each instruction holds a ROB entry from when it's issued until it finishes, and when every entry is taken, the core can't issue anything new until one frees up.</p>
+          <p>Each 2 KB chunk takes 128 vector loads through the LSU, at about 5 cycles each. Every load holds an entry in the 8-entry ROB until it finishes, and so does every MAC instruction, which keeps the engine busy for 8 cycles. With only 8 entries, a few loads and MACs fill the ROB quickly.</p>
+          <p>We set our memory bandwidth at 100 MB/s because it takes about 1,200–1,450 cycles to compute on 2 KB of weights. If we look at what those cycles are doing, only a tiny fraction are matmuls; the rest is the core moving data around. Even though the matrix engine could consume data much faster than 100 MB/s, we're limited by how fast the core can feed it.</p>
+
+          <figure class="chart" data-kind="stack">
+            <figcaption>Cycles spent on one 2 KB chunk of weights, by flash speed</figcaption>
+            <script type="application/json">
+            {
+              "unit": "cycles",
+              "max": 2200,
+              "series": ["LSU loading weights", "Matrix multiply", "Other core work", "Waiting on flash"],
+              "rows": [
+                {"label": "50 MB/s", "values": [635, 32, 482, 968]},
+                {"label": "100 MB/s", "values": [641, 32, 478, 0]}
+              ],
+              "marker": {"at": 1024, "label": "a chunk arrives every 1,024 cycles at 100 MB/s"}
+            }
+            </script>
+          </figure>
+
+          <p>Raising the flash bandwidth further shows the same thing from the other side. At 200 MB/s flash goes idle two thirds of the time, but the LSU stays exactly as busy, because it's now the limit.</p>
+
+          <figure class="chart" data-kind="bars">
+            <figcaption>Share of decode time each unit is busy, by flash speed</figcaption>
+            <script type="application/json">
+            {
+              "unit": "%",
+              "max": 100,
+              "series": ["50 MB/s", "100 MB/s", "200 MB/s"],
+              "ramp": true,
+              "rows": [
+                {"label": "Flash", "values": [81, 64, 33]},
+                {"label": "LSU", "values": [44, 69, 69]},
+                {"label": "DTCM port", "values": [14, 22, 22]},
+                {"label": "PSRAM", "values": [12, 20, 20]},
+                {"label": "Matrix engine", "values": [1, 2, 2]}
+              ]
+            }
+            </script>
+          </figure>
+
+          <p>There are two different things we mean by matrix engine utilization. The first is <em>time</em>: what fraction of the workload's cycles the engine is doing anything at all. That's the busy share in the chart above, about 2% of decode at 100 MB/s. The second is <em>how hard it works while it's running</em>: when it is busy, how many of its 128 MACs per cycle it actually uses. Today each operation uses only 64 of the 128 slots, so even while it's busy the engine runs at half its peak. Multiply the two together and you get achieved ops/s compared to peak ops/s, which is what the next chart shows: about 1.2% at 100 MB/s.</p>
+          <p>To see how much each limit costs, we removed them one at a time in the simulator. Unlimited bandwidth alone does almost nothing, because the core then caps it. Even with every memory-side limit gone, decode only reaches about 1.6%: the physics ceiling.</p>
+
+          <figure class="chart" data-kind="bars">
+            <figcaption>Matrix engine ops/s as a share of peak during decode, removing one limit at a time</figcaption>
+            <script type="application/json">
+            {
+              "unit": "%",
+              "max": 2,
+              "decimals": 2,
+              "series": ["Utilization"],
+              "rows": [
+                {"label": "Flash 50 MB/s, PSRAM 12.5 MB/s", "values": [0.65]},
+                {"label": "Flash 100 MB/s, PSRAM 50 MB/s", "values": [1.17]},
+                {"label": "Unlimited bandwidth", "values": [1.19]},
+                {"label": "+ 1-cycle LSU", "values": [1.47]},
+                {"label": "+ DTCM port of any width", "values": [1.57]},
+                {"label": "+ DTCM with no latency", "values": [1.64]}
+              ]
+            }
+            </script>
+          </figure>
+
+          <p>Fixing the core takes two changes together. At 4 bytes/cycle of flash, a newer LSU (with overhead per instruction instead of per register) and a bigger ROB each help a little alone, but together they cut decode time by two thirds. A bigger ROB just fills with loads if the LSU is slow, and a faster LSU just fills the small ROB.</p>
+          <table class="num">
+            <tr><th>Decode cycles per token, flash 4 B/cycle</th><th>ROB 8</th><th>ROB 16</th></tr>
+            <tr><td>Current LSU</td><td>31.6M</td><td>27.0M</td></tr>
+            <tr><td>Newer LSU</td><td>26.0M</td><td><strong>18.9M</strong></td></tr>
+          </table>
+
+          <p>Batching moves the limit again. Decoding 8 stories in one pass over the weights uses each weight byte 8 times, so flash stops being the main limit. Then the core can't issue MAC instructions fast enough: it starts one about every 42 cycles, and each one holds a ROB entry for its 8 cycles of work. The ROB is full most of the time.</p>
+
+          <figure class="chart" data-kind="bars">
+            <figcaption>What the core's dispatch slots go to, batch 8, unlimited bandwidth</figcaption>
+            <script type="application/json">
+            {
+              "unit": "%",
+              "max": 50,
+              "series": ["Share of dispatch slots"],
+              "rows": [
+                {"label": "ROB full, behind a matrix instruction", "values": [45]},
+                {"label": "Waiting on an earlier result", "values": [21]},
+                {"label": "ROB full, behind a vector instruction", "values": [17]},
+                {"label": "Useful work", "values": [10]},
+                {"label": "Everything else", "values": [6]},
+                {"label": "Front end", "values": [0.7]}
+              ]
+            }
+            </script>
+          </figure>
+
+          <p>So right now our biggest bottleneck is moving data around on the core. That isn't an inference problem, though, and our hardware teams are working hard on solving it.</p>
+        </section>
+
+        <!-- ============================================================ -->
+        <section id="next">
+          <h2>5. What we're working on</h2>
+
+          <h3>Online roofline visualization</h3>
+          <p>Our kernel work had been all over the place, and I thought we needed a source of truth that every team could use to see what our performance on <a href="https://github.com/google-coral/coralnpu">Coral</a> looks like right now. So I built <a href="https://marvalarva2929.github.io/reef-perf-explorer/">reef-perf-explorer</a>.</p>
+          <figure class="todo">[ screenshot of the explorer ]</figure>
+          <p>It shows our workflow as blocks, and for each block where the bottleneck is and how much that block contributes to our performance. You can see where our biggest bottlenecks are, overall and per system.</p>
+          <p>When we talked to hardware, we had to build a separate explanation for everything, and a lot of the discussions were siloed (like the DMA discussion). Now there's one place where any number about our projected performance comes from, so anyone can track and understand it. The model efficiency team can try an architecture change, like more heads, a wider MLP or another TinyStories size, and hardware can try a change, like bandwidth, clock or DMA overlap. Both see right away how it moves our estimated performance and where the bottlenecks are, based on our most recent kernels.</p>
+          <p>The first version used numbers from my RTL sims, since that's all we had. The team's feedback was that it should come straight from the performance model, so there wouldn't be four different models running around with no source of truth. Once the matrix engine was in reef-perf, I switched it to measured reef-perf runs for TinyStories-28M and 33M.</p>
+
+          <h3>Batching</h3>
+          <p>Decoding several stories in one pass over the weights uses each weight byte once per story, so we get more tokens out of the same bandwidth. The 32 KB DTCM caps us at 8 stories. In the simulator, with today's core and our target bandwidths, 8 stories together run at about 6.5 tokens/s, though each story on its own gets slower. As the dispatch-slot chart above shows, at batch 8 the limit moves from flash to how fast the core can issue MAC instructions.</p>
+
+          <h3>int4 quantization</h3>
+          <p>Storing the weights in int4 packs two weights into every byte, so each token streams half as many bytes. In decode the number of MACs equals the number of weights we load, and we're limited by how fast those weights arrive, so at the same bandwidth that roughly doubles tokens per second. In reef-perf, native int4 makes each layer's linear kernels 1.73× faster, which would take decode from 1.45 to about 2.35 tokens/s. We're working with the hardware teams on the best way to implement it. In our last meeting we decided to add int4 lanes to the Coral matrix engine spec (Coral has no native int4 support) while keeping int8 support in case we need it. On our end, the model efficiency team has confirmed that with quantization-aware training (QAT) we can quantize to int4 without a significant loss in output quality.</p>
+
+          <h3>Low-rank weights</h3>
+          <p>Instead of storing a full weight matrix, we store two thin ones that multiply to approximate it. A 16 × 16 matrix is 256 weights. Written as a 16 × 4 matrix times a 4 × 16 matrix, it's 128, half the bytes. For a d × d layer, rank d/4 halves the bytes. We apply the two thin matrices to the input one after the other, so the MACs shrink along with the bytes. In reef-perf it makes each layer's linear kernels 1.71× faster, about the same as int4, and the two can stack. We haven't checked accuracy for low-rank weights yet, but if it holds up, combining it with int4 could take decode to about 3.6 tokens/s, 2.5× today's speed. We haven't run that combination yet, so that number assumes the two speedups multiply.</p>
+
+          <h3>Also on the list</h3>
+          <ul>
+            <li><a href="https://arxiv.org/abs/2211.17192">Speculative decoding</a></li>
+            <li>Different model architectures with fewer parameters</li>
+          </ul>
+        </section>
+      </article>
     </main>
   </div>
-  <script src="../nav.js?v=8"></script>
+  <script src="../nav.js?v=25"></script>
+  <script src="article.js?v=25"></script>
 </body>
 </html>
