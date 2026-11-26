@@ -4,6 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Running an LLM at 1.5 tokens/s on 32 KB · Joshua Vigel</title>
+  <link rel="icon" type="image/png" href="../favicon.png">
+  <link rel="apple-touch-icon" href="../apple-touch-icon.png">
   <link rel="stylesheet" href="../style.css?v=25">
 </head>
 <body data-root="../">
@@ -59,6 +61,7 @@
             <li>Compute the block's probabilities p = e<sup>s − m′</sup>, add their sum to ℓ, and add p · V (a second matmul) to O.</li>
           </ol>
           <p>After the last block, O / ℓ is exactly the attention output, the same as if every score had been stored. Each key and value is read once, and the only state that survives between blocks is m, ℓ and O. The working set is one block plus a few small running values no matter how long the context gets, and both steps that do the real work are matmuls on the matrix engine.</p>
+          <p class="kernel"><a class="code" data-src="e2e-attention.cc" data-lines="137-263">attention.cc</a> is my implementation. It streams each head's keys and values in 2 KB chunks and runs the loop above on every block. During decode there's only one query, so <a class="code" data-src="e2e-attention.cc" data-lines="12-60">attend_row</a> reads all 16 scores of a block as a single row and runs the softmax on that one vector.</p>
 
           <h3>Implementing it with double buffering</h3>
           <p>Loading a chunk and computing on it one after the other wastes time: the matrix engine waits while the DMA loads, and the DMA waits while the engine computes. With double buffering there are two buffers. While the engine computes on chunk <em>i</em> in one, the DMA loads chunk <em>i+1</em> into the other. When both are done they swap. As long as computing a chunk takes about as long as loading one, the memory transfers are almost entirely hidden.</p>
@@ -79,6 +82,7 @@
           </figure>
           <p>Here's how the DTCM is split up while attention runs. The bar is the whole 32 KB drawn to scale. The colored regions are what attention uses, and the gray ones are idle.</p>
           <div class="dtcm" data-name="attention" data-use="normed=attention output written|shared=Q, K, V and two KV buffers|scratch=softmax state: running max, sum and output"></div>
+          <p>Here's a link to the other kernels I built: <a href="https://github.com/LonghornSilicon/reef/tree/main/inference-engine/coral/kernels">reef/inference-engine/coral/kernels</a>.</p>
         </section>
 
         <!-- ============================================================ -->
